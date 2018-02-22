@@ -4,12 +4,10 @@ module Midi where
   import Data.Bifunctor
   import Data.ByteString
   import Data.Word
-  type Channel = Word8
-  data Composition = Composition Tempo [Melody_track] [Percussion_event] deriving Show
+  data Composition = Composition Word8 [Melody_track] [Percussion_event] deriving Show
   type Err t = Either String t
   data Event = End | Start deriving Show
-  data Event' = Event' Time Event Note deriving Show
-  type File_name = String
+  data Event' = Event' Word8 Event Word8 deriving Show
   data Melodic_instrument =
     Bells |
     Cello |
@@ -25,8 +23,7 @@ module Midi where
     Voice
       deriving Show
   data Melody_track = Melody_track Melodic_instrument [Event'] deriving Show
-  type Note = Word8
-  data Percussion_event = Percussion_event Time Percussion_instrument deriving Show
+  data Percussion_event = Percussion_event Word8 Percussion_instrument deriving Show
   data Percussion_instrument =
     Bass_drum_1 |
     Bass_drum_2 |
@@ -76,111 +73,91 @@ module Midi where
     Tambourine |
     Vibra_slap
       deriving (Eq, Show)
-  type Tempo = Word32
-  data Track = Track Channel [Word8] [Event']
-  type Tracks = Word8
-  type Time = Word32
-  bytes :: Word8 -> String -> Word32 -> Err [Word8]
+  data Track = Track Word8 [Word8] [Event'] deriving Show
+  bytes :: Word8 -> Word32 -> [Word8]
   bytes = bytes' []
-  bytes' :: [Word8] -> Word8 -> String -> Word32 -> Err [Word8]
-  bytes' x n err y =
+  bytes' :: [Word8] -> Word8 -> Word32 -> [Word8]
+  bytes' x n y =
     case n of
-      0 ->
-        case y of
-          0 -> Right x
-          _ -> Left err
-      _ -> bytes' (fromIntegral (mod y 256) : x) (n - 1) err (div y 256) 
+      0 -> x
+      _ -> bytes' (fromIntegral (mod y 256) : x) (n - 1) (div y 256)
   encode :: Composition -> Err [Word8]
   encode (Composition tempo melody percussion) =
-    (
-      bytes 3 "Tempo too slow." tempo >>=
-      \encoded_tempo ->
+    if tempo < 4
+      then Left "Tempo should be at least 4 beats per minute."
+      else
         (
-          encode_melodies [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15] melody >>=
-          \(tracks, encoded_melody) ->
-            (++) [77, 84, 104, 100, 0, 0, 0, 6, 0, 1, 0, tracks, 0, 8] <$> encode_tracks (Track 9 ([0, 255, 81, 3] ++ encoded_tempo) (encode_percussions (start <$> percussion)) : encoded_melody)))
-  encode_event :: Channel -> Event' -> Err [Word8]
+          encode_melody [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15] melody >>=
+          \(tracks, melody') ->
+            (
+              (++) [77, 84, 104, 100, 0, 0, 0, 6, 0, 1, 0, tracks, 0, 8] <$>
+              encode_tracks
+                (
+                  Track
+                    9
+                    ([0, 255, 81, 3] ++ bytes 3 (div 60000000 (fromIntegral tempo)))
+                    (encode_percussion (start <$> percussion)) :
+                  melody')))
+  encode_event :: Word8 -> Event' -> Err [Word8]
   encode_event channel (Event' time event note) =
     if note < 128
-      then (++) [event_number event + channel, note, 127] <$> encode_time time
+      then Right (encode_time time ++ [event_number event + channel, note, 127])
       else Left "The range of notes is {0,...,127}."
-  encode_events :: Channel -> [Event'] -> Err [Word8]
-  encode_events channel events =
-    case events of
-      [] -> Right []
-      event : events' ->
-        encode_event channel event >>= \encoded_event -> (++) encoded_event <$> encode_events channel events'
-  encode_melodies :: [Channel] -> [Melody_track] -> Err (Tracks, [Track])
-  encode_melodies channels melodies =
-    case channels of
-      [] -> Left "The number of melody tracks is limited to 15."
-      channel : channels' ->
-        case melodies of
-          [] -> Right (1, [])
-          (Melody_track instrument melody) : melodies' ->
+  encode_events :: Word8 -> [Event'] -> Err [Word8]
+  encode_events channel = map_and_cat (encode_event channel)
+  encode_melody :: [Word8] -> [Melody_track] -> Err (Word8, [Track])
+  encode_melody channels melodies =
+    case melodies of
+      [] -> Right (1, [])
+      Melody_track instrument melody : melodies' ->
+        case channels of
+          [] -> Left "The number of melody tracks is limited to 15."
+          channel : channels' ->
             (
               bimap ((+) 1) ((:) (Track channel [0, 192 + channel, melodic_instrument instrument] melody)) <$>
-              encode_melodies channels' melodies')
-{-
-  encode_percussion :: [Event'] -> Err [Word8]
-  encode_percussion [] = Right []
-  encode_percussion(Event' time event instrument : tl) = case encode_time time of
-    Just encoded_time ->
-      ((encoded_time ++ [event_number event + 9, instrument, 127]) ++) <$>
-      encode_percussion(case event of
-        End -> tl
-        Start -> ins instrument 32 tl)
-    Nothing -> Left "Event timing overflow."
--}
-  encode_percussions :: [Event'] -> [Event']
-  encode_percussions percussions =
-    case percussions of
+              encode_melody channels' melodies')
+  encode_percussion :: [Event'] -> [Event']
+  encode_percussion percussion =
+    case percussion of
       [] -> []
-      percussion @ (Event' time event instrument) : percussions' ->
+      event' @ (Event' time event instrument) : percussion' ->
         (
-          percussion :
-          encode_percussions
+          event' :
+          encode_percussion
             (case event of
-              End -> percussions'
-              Start -> ins time instrument percussions'))
-  encode_time :: Word32 -> Err [Word8]
-  encode_time 0 = Right [0]
-  encode_time time = encode_time' [] time
-  encode_time' :: [Word8] -> Word32 -> Err [Word8]
-  encode_time' [_, _, _, _, _] 0 = Left "Event timing overflow."
-  encode_time' encoded 0 = Right (set_highest_bits encoded)
-  encode_time' encoded raw = encode_time' (fromIntegral (mod raw 128) : encoded) (div raw 128)
-  encode_track :: [Word8] -> Err [Word8]
-  encode_track events =
-    let
-      track_with_end = events ++ [0, 255, 47, 0]
-    in
-      (\encoded_length -> [77, 84, 114, 107] ++ encoded_length ++ track_with_end) <$> bytes 4 "A track is too long" (fromIntegral (Prelude.length track_with_end))
+              End -> percussion'
+              Start -> insert_event time instrument percussion'))
+  encode_time :: Word8 -> [Word8]
+  encode_time time = if time < 128 then [time] else [129, time - 128]
+  encode_track :: Track -> Err [Word8]
+  encode_track (Track channel header events) =
+    (
+      (\events' ->
+        let
+          track = header ++ events' ++ [0, 255, 47, 0]
+        in
+          [77, 84, 114, 107] ++ bytes 4 (fromIntegral (Prelude.length track)) ++ track) <$>
+      encode_events channel events)
   encode_tracks :: [Track] -> Err [Word8]
-  encode_tracks tracks =
-    case tracks of
-      [] -> Right []
-      Track channel header events : tracks' -> encode_events channel events >>= \x -> (++) (header ++ x) <$> encode_tracks tracks'
+  encode_tracks = map_and_cat encode_track
   event_number :: Event -> Word8
   event_number event =
     case event of
       End -> 128
       Start -> 144
-  flat_map :: Monad f => (t -> f [u]) -> [t] -> f [u]
-  flat_map = (.)((<$>) Prelude.concat) . mapM
-  ins :: Word32 -> Note -> [Event'] -> [Event']
-  ins time instrument track = let
-    end_as_planned = Event' time End instrument in
-    case track of
-      [] -> [end_as_planned]
-      Event' next_time event next_instrument : tl ->
-        if next_time < time then
-          if next_instrument == instrument then
-            Event' next_time End instrument : Event' 0 Start instrument : tl
-          else
-            Event' next_time event next_instrument : ins (time - next_time) instrument tl
-        else
-          end_as_planned : Event' (next_time - time) event next_instrument : tl
+  insert_event :: Word8 -> Word8 -> [Event'] -> [Event']
+  insert_event time instrument track =
+    let
+      end_as_planned = Event' time End instrument
+    in
+      case track of
+        [] -> [end_as_planned]
+        Event' time' event instrument' : track' ->
+          if time' < time
+            then Event' time' event instrument' : insert_event (time - time') instrument track'
+            else end_as_planned : Event' (time' - time) event instrument' : track'
+  map_and_cat :: Monad f => (t -> f [u]) -> [t] -> f [u]
+  map_and_cat f x = Prelude.concat <$> mapM f x
   melodic_instrument :: Melodic_instrument -> Word8
   melodic_instrument instrument =
     case instrument of
@@ -197,9 +174,10 @@ module Midi where
       Violin -> 40
       Voice -> 53
   midi :: String -> Composition -> IO ()
-  midi file_name composition = case encode composition of
-    Left message -> Prelude.putStrLn("Error. " ++ message)
-    Right encoded -> Data.ByteString.writeFile file_name (pack encoded)
+  midi file composition =
+    case encode composition of
+      Left err -> Prelude.putStrLn err
+      Right encoding -> Data.ByteString.writeFile (file ++ ".mid") (pack encoding)
   percussion_instrument :: Percussion_instrument -> Word8
   percussion_instrument instrument =
     case instrument of
@@ -250,10 +228,6 @@ module Midi where
       Splash_cymbal -> 55
       Tambourine -> 54
       Vibra_slap -> 58
-  set_highest_bits :: [Word8] -> [Word8]
-  set_highest_bits [] = undefined
-  set_highest_bits [h] = [h]
-  set_highest_bits (h : next : t) = h + 128 : set_highest_bits(next : t)
   start :: Percussion_event -> Event'
   start (Percussion_event time instrument) = Event' time Start (percussion_instrument instrument)
 -----------------------------------------------------------------------------------------------------------------------------
