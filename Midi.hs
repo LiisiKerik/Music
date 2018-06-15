@@ -2,13 +2,12 @@
 {-# OPTIONS_GHC -Wall #-}
 module Midi where
   import Data.Bifunctor
-  import Data.Bits
   import Data.ByteString
   import Data.Int
   import Data.List
   import Data.Map
   import Data.Word
-  data Composition = Composition Word8 Word8 [Word8] [Melody] [Percussion_event] deriving Show
+  data Composition = Composition Word8 [Word8] [Melody] [Percussion_event] deriving Show
   type Err t = Either String t
   data Event = Event Word8 [Int8] [Int8] deriving Show
   data Melodic_instrument =
@@ -66,32 +65,26 @@ module Midi where
       0 -> x
       _ -> bytes' (fromIntegral (mod y 256) : x) (n - 1) (div y 256)
   encode :: Composition -> Err [Word8]
-  encode (Composition breakdown tempo velocities melody percussion) =
-    if breakdown < 8
-      then
-        if tempo < 4
-          then Left "Tempo should be at least 4 beats per minute."
-          else
-            case velocities of
-              [] -> Left "The list of velocities should not be empty."
-              velocity : velocities' ->
+  encode (Composition tempo velocities melody percussion) =
+    case velocities of
+      [] -> Left "The list of velocities should not be empty."
+      velocity : velocities' ->
+        (
+          velocity_map (Velocities 1 (Data.Map.singleton 0 velocity)) velocities' >>=
+          \velocities'' ->
+            (
+              encode_melody (Data.List.delete 9 [0 .. 15]) melody >>=
+              \(tracks, melody') ->
                 (
-                  velocity_map (Velocities 1 (Data.Map.singleton 0 velocity)) velocities' >>=
-                  \velocities'' ->
+                  (++) [77, 84, 104, 100, 0, 0, 0, 6, 0, 1, 0, tracks, 0, 1] <$>
+                  encode_tracks
+                    velocities''
                     (
-                      encode_melody (Data.List.delete 9 [0 .. 15]) melody >>=
-                      \(tracks, melody') ->
-                        (
-                          (++) [77, 84, 104, 100, 0, 0, 0, 6, 0, 1, 0, tracks, 0, shiftL 1 (fromIntegral breakdown)] <$>
-                          encode_tracks
-                            velocities''
-                            (
-                              Track
-                                9
-                                ([0, 255, 81, 3] ++ bytes 3 (div 60000000 (fromIntegral tempo)))
-                                (encode_percussion [] percussion) :
-                              melody'))))
-      else Left "Quarternote breakdown should be no more than 1 / 2 ^ 7."
+                      Track
+                        9
+                        ([0, 255, 81, 3] ++ bytes 3 (div 1000000 (fromIntegral tempo)))
+                        (encode_percussion [] percussion) :
+                      melody'))))
   encode_event :: Velocities -> Word8 -> Word8 -> Event -> Err (Word8, [Word8])
   encode_event (Velocities bar_length velocities) channel time (Event time' end start) =
     let
